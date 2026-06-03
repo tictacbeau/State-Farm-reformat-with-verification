@@ -52,6 +52,9 @@ WHITE = colors.HexColor("#FFFFFF")
 # --- Helper Functions ---
 def normalize_amount(raw: str) -> str:
     raw = str(raw).strip().lstrip('$')
+    # Treat literal "null" (seen in some State Farm PDFs) as zero
+    if raw.lower() in ('null', 'n/a', ''):
+        return '$0.00'
     try:
         val = float(raw.replace(',', ''))
         return f'${val:,.2f}'
@@ -149,11 +152,15 @@ def create_payment_pdf(payment_data, invoices):
     )
 
     # Format date for stamp — produces e.g. "MAY 28 2026"
-    try:
-        dt = datetime.strptime(payment_data.get('date', ''), "%m-%d-%Y")
-        pay_date_stamp = dt.strftime("%b %d %Y").upper()
-    except ValueError:
-        pay_date_stamp = payment_data.get('date', '')
+    # Handles both MM-DD-YYYY (legacy) and YYYY-MM-DD (ISO, newer PDFs)
+    pay_date_stamp = payment_data.get('date', '')
+    for fmt in ("%Y-%m-%d", "%m-%d-%Y"):
+        try:
+            dt = datetime.strptime(pay_date_stamp, fmt)
+            pay_date_stamp = dt.strftime("%b %d %Y").upper()
+            break
+        except ValueError:
+            continue
 
     elements.append(Paragraph("Received", style_stamp_1))
     elements.append(Paragraph(pay_date_stamp, style_stamp_2))
@@ -578,19 +585,29 @@ class StateFarmFormatterApp(ctk.CTk):
         warnings = []
 
         # --- HEADER PARSING ---
+        # Each field is self-labeling in the PDF (e.g. "Date:", "TIN:", "Payment Total:").
+        # Capture whatever value follows the label — don't encode format assumptions into
+        # the regex, because State Farm changes formatting across PDF variants/dates.
+
+        # Payment number: appears as "Payment <code>" where the code is a long
+        # alphanumeric string (e.g. 119659571KA0527). Requiring [A-Z0-9]{10,}
+        # naturally excludes ordinary words like "Details" or "information".
         m_pay_num = re.search(r'Payment\s+([A-Z0-9]{10,})', full_text)
         if m_pay_num:
             payment_data['payment_num'] = m_pay_num.group(1)
 
-        m_date = re.search(r'Date:\s*(\d{2}-\d{2}-\d{4})', full_text)
+        # Date: grab whatever token follows "Date:" regardless of format
+        m_date = re.search(r'Date:\s*(\S+)', full_text)
         if m_date:
             payment_data['date'] = m_date.group(1)
 
-        m_tin = re.search(r'TIN:\s*(\*{4}\d{4})', full_text)
+        # TIN: grab whatever follows "TIN:"
+        m_tin = re.search(r'TIN:\s*(\S+)', full_text)
         if m_tin:
             payment_data['tin'] = m_tin.group(1)
 
-        m_total = re.search(r'Payment Total:?\s*\$?([\d,]+\.?\d*)', full_text)
+        # Payment Total: strip leading $ and commas, parse as number
+        m_total = re.search(r'Payment Total[:\s]+\$?([\d,]+\.?\d*)', full_text)
         if m_total:
             payment_data['total_str'] = normalize_amount(m_total.group(1))
             payment_data['total_numeric'] = parse_float_amount(m_total.group(1))
