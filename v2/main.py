@@ -528,7 +528,9 @@ class StateFarmFormatterApp(ctk.CTk):
                         'date': result['payment_data'].get('date', '')
                     })
 
-                    self.after(0, self.log, f"✓ Parsed: {filename} → {result['payment_data']['total_str']} ({len(result['invoices'])} invoices) [all checks passed]", "success")
+                    warn_count = len(result['warnings'])
+                    status_tag = "all checks passed" if warn_count == 0 else f"{warn_count} warning{'s' if warn_count != 1 else ''}"
+                    self.after(0, self.log, f"✓ Parsed: {filename} → {result['payment_data']['total_str']} ({len(result['invoices'])} invoices) [{status_tag}]", "success")
 
                 pct = (i + 1) / total_files
                 self.after(0, self.update_progress, pct)
@@ -699,34 +701,94 @@ class StateFarmFormatterApp(ctk.CTk):
                 'paid': paid_l[j]
             })
 
-        # --- VERIFICATION CHECKS ---
+        # ======================================================================
+        # VERIFICATION — ordered from hard failures (returns early) to
+        # per-field warnings that are logged but still allow the file through.
+        # Every check names exactly what is wrong and where.
+        # ======================================================================
 
-        # Check 1 (CRITICAL): billing ref must not look like a date — if the
-        # pattern ^\d{2}-\d{2}-\d{4}$ matches, the parser grabbed an invoice
-        # date instead of a ref number.
-        for ref in billing_refs:
+        # ── CRITICAL A: billing ref must not look like a date ──────────────
+        # If it does, the state machine grabbed an invoice date instead of the
+        # reference number — the whole invoice block is misaligned.
+        for i, ref in enumerate(billing_refs, start=1):
             if re.match(r'^\d{2}-\d{2}-\d{4}$', ref):
-                return {'status': 'failed', 'reason': 'billing_ref looks like a date (parsing error)'}
+                return {
+                    'status': 'failed',
+                    'reason': f'invoice {i}: billing_ref "{ref}" looks like a date — parser misaligned'
+                }
 
-        # Check 2 (WARNING): all eight field lists must be the same length.
-        lengths = [len(billing_refs), len(invoice_dates), len(insureds), len(claim_nums),
-                   len(contacts), len(submitted_l), len(adjusted_l), len(paid_l)]
-        if len(set(lengths)) > 1:
-            warnings.append(f"field count mismatch: refs={lengths[0]} dates={lengths[1]} insureds={lengths[2]} claims={lengths[3]} contacts={lengths[4]} sub={lengths[5]} adj={lengths[6]} paid={lengths[7]}")
-
-        # Check 3 (CRITICAL): payment total must be present.
+        # ── CRITICAL B: payment total must be present ───────────────────────
         if not m_total:
-            return {'status': 'failed', 'reason': 'no payment total found'}
+            return {'status': 'failed', 'reason': 'Payment Total not found in document'}
 
-        # Check 4 (WARNING): parsed total must match the dollar amount in the
-        # filename within $0.02 tolerance.
+        # ── CRITICAL C: at least one invoice block must be found ────────────
+        if not invoices:
+            return {'status': 'failed', 'reason': 'no invoice blocks found'}
+
+        # ── WARNING D: payment header fields ────────────────────────────────
+        # Each of these is self-labeled in the PDF; a missing value means the
+        # parser didn't find the label at all.
+        for key, label in [
+            ('payment_num', 'Payment number'),
+            ('date',        'Payment date'),
+            ('tin',         'TIN'),
+        ]:
+            if not payment_data.get(key, '').strip():
+                warnings.append(f'header field missing: {label}')
+
+        # ── WARNING E: invoice field list lengths must all be equal ─────────
+        list_lengths = {
+            'billing_refs':   len(billing_refs),
+            'invoice_dates':  len(invoice_dates),
+            'insureds':       len(insureds),
+            'claim_nums':     len(claim_nums),
+            'contacts':       len(contacts),
+            'submitted':      len(submitted_l),
+            'adjusted':       len(adjusted_l),
+            'paid':           len(paid_l),
+        }
+        if len(set(list_lengths.values())) > 1:
+            detail = '  '.join(f'{k}={v}' for k, v in list_lengths.items())
+            warnings.append(f'invoice field count mismatch — {detail}')
+
+        # ── WARNING F: every field in every invoice must be populated ────────
+        # adjusted is allowed to be $0.00 (no adjustment made is legitimate).
+        # All other fields being empty or $0.00 indicates a parsing miss.
+        for j, inv in enumerate(invoices, start=1):
+            checks = [
+                ('billing_ref',  'Billing ref',      False),
+                ('invoice_date', 'Invoice date',     False),
+                ('insured',      'Named insured',    False),
+                ('claim_num',    'Claim number',     False),
+                ('contact',      'Contact',          False),
+                ('submitted',    'Submitted amount', False),
+                ('adjusted',     'Adjusted amount',  True),   # $0.00 is valid
+                ('paid',         'Paid amount',      False),
+            ]
+            for field, label, zero_ok in checks:
+                val = inv.get(field, '').strip()
+                if not val:
+                    warnings.append(f'invoice {j}: {label} is empty')
+                elif val == '$0.00' and not zero_ok:
+                    warnings.append(f'invoice {j}: {label} is $0.00 — may indicate a parsing miss')
+
+        # ── WARNING G: sum of paid amounts must equal Payment Total ──────────
+        paid_sum = sum(parse_float_amount(inv['paid']) for inv in invoices)
+        if abs(paid_sum - payment_data['total_numeric']) > 0.02:
+            warnings.append(
+                f'paid amounts sum to ${paid_sum:,.2f} but Payment Total is '
+                f'{payment_data["total_str"]} '
+                f'(Δ ${abs(paid_sum - payment_data["total_numeric"]):.2f})'
+            )
+
+        # ── WARNING H: parsed total vs filename amount ───────────────────────
         file_total = total_from_filename(pdf_path)
         if file_total is not None and abs(file_total - payment_data['total_numeric']) > 0.02:
-            warnings.append(f"total mismatch: parsed={payment_data['total_numeric']}, filename suggests={file_total}")
-
-        # Check 5 (CRITICAL): at least one invoice block must have been found.
-        if len(billing_refs) == 0:
-            return {'status': 'failed', 'reason': 'no invoice blocks found'}
+            warnings.append(
+                f'filename suggests ${file_total:,.2f} but parsed total is '
+                f'{payment_data["total_str"]} '
+                f'(Δ ${abs(file_total - payment_data["total_numeric"]):.2f})'
+            )
 
         return {
             'status': 'success',
