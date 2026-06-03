@@ -413,7 +413,7 @@ class StateFarmFormatterApp(ctk.CTk):
         footer_border2.pack(fill="x", side="top")
 
         ctk.CTkLabel(footer_frame, text="Lewis Brisbois · Accounts Receivable", text_color=TEXT_MUTED, font=("Segoe UI", 11)).pack(side="left", padx=24, pady=6)
-        ctk.CTkLabel(footer_frame, text="v2.0", text_color=TEXT_MUTED, font=("Segoe UI", 11)).pack(side="right", padx=24, pady=6)
+        ctk.CTkLabel(footer_frame, text="v3.0", text_color=TEXT_MUTED, font=("Segoe UI", 11)).pack(side="right", padx=24, pady=6)
 
     def round_rectangle(self, canvas, x1, y1, x2, y2, radius=25, **kwargs):
         points = [x1+radius, y1, x1+radius, y1, x2-radius, y1, x2-radius, y1, x2, y1, x2, y1+radius, x2, y1+radius, x2, y2-radius, x2, y2-radius, x2, y2, x2-radius, y2, x2-radius, y2, x1+radius, y2, x1+radius, y2, x1, y2, x1, y2-radius, x1, y2-radius, x1, y1+radius, x1, y1+radius, x1, y1]
